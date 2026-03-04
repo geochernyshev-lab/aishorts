@@ -33,7 +33,7 @@ export async function startElevenLabsDubbing({
   formData.append("source_url", videoUrl);
   // Preserve original speaker's voice timbre + intonation
   formData.append("num_speakers", "0"); // auto-detect
-  formData.append("watermark", "false");
+  formData.append("watermark", "true");
   formData.append("dubbing_studio", "false"); // faster non-studio mode
 
   const response = await fetch(`${ELEVENLABS_API_URL}/dubbing`, {
