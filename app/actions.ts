@@ -3,8 +3,7 @@
 import { auth } from "@clerk/nextjs/server";
 import { put } from "@vercel/blob";
 import { createServerSupabaseClient } from "@/lib/supabase";
-import { startElevenLabsDubbing, waitForDubbingComplete, downloadDubbedAudio } from "@/lib/elevenlabs";
-import { submitSyncLabsJob } from "@/lib/synclabs";
+import { startElevenLabsDubbing } from "@/lib/elevenlabs";
 import { revalidatePath } from "next/cache";
 
 const APP_URL = process.env.NEXT_PUBLIC_APP_URL ?? "http://localhost:3000";
@@ -41,10 +40,12 @@ export async function uploadAndProcessVideo(
     return { success: false, error: "Insufficient credits. Please upgrade your plan." };
   }
 
+  // Загружаем видео в Blob
   const blob = await put(`videos/${userId}/${Date.now()}-${file.name}`, file, {
     access: "public",
   });
 
+  // Создаём проект в базе
   const { data: project, error: insertError } = await supabase
     .from("projects")
     .insert({
@@ -61,68 +62,27 @@ export async function uploadAndProcessVideo(
     return { success: false, error: "Failed to create project" };
   }
 
-  processVideo({
-    userId,
-    projectId: project.id,
-    videoUrl: blob.url,
-    targetLanguage,
-  }).catch(async (err) => {
-    console.error("[processVideo] Error:", err);
+  // Запускаем дубляж — НЕ ждём завершения, крон сам проверит
+  try {
+    const { dubbing_id } = await startElevenLabsDubbing({
+      videoUrl: blob.url,
+      targetLanguage,
+    });
+
+    await supabase
+      .from("projects")
+      .update({ elevenlabs_dubbing_id: dubbing_id })
+      .eq("id", project.id);
+  } catch (err) {
     await supabase
       .from("projects")
       .update({ status: "failed", error_message: String(err) })
       .eq("id", project.id);
-  });
+    return { success: false, error: String(err) };
+  }
 
   revalidatePath("/dashboard");
   return { success: true, projectId: project.id };
-}
-
-async function processVideo({
-  userId,
-  projectId,
-  videoUrl,
-  targetLanguage,
-}: {
-  userId: string;
-  projectId: string;
-  videoUrl: string;
-  targetLanguage: string;
-}) {
-  const supabase = createServerSupabaseClient();
-
-  const { dubbing_id } = await startElevenLabsDubbing({ videoUrl, targetLanguage });
-
-  await supabase
-    .from("projects")
-    .update({ elevenlabs_dubbing_id: dubbing_id })
-    .eq("id", projectId);
-
-  const audioApiUrl = await waitForDubbingComplete(dubbing_id, targetLanguage);
-  const audioBuffer = await downloadDubbedAudio(audioApiUrl);
-
-  const audioBlob = await put(
-    `audio/${userId}/${projectId}-dubbed.mp3`,
-    new Blob([audioBuffer], { type: "audio/mpeg" }),
-    { access: "public" }
-  );
-
-  await supabase
-    .from("projects")
-    .update({ dubbed_audio_url: audioBlob.url, status: "syncing" })
-    .eq("id", projectId);
-
-  const webhookUrl = `${APP_URL}/api/webhooks/synclabs`;
-  const syncJob = await submitSyncLabsJob({
-    videoUrl,
-    audioUrl: audioBlob.url,
-    webhookUrl,
-  });
-
-  await supabase
-    .from("projects")
-    .update({ sync_job_id: syncJob.id })
-    .eq("id", projectId);
 }
 
 export async function deleteProject(projectId: string): Promise<void> {
